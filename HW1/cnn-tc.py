@@ -2,8 +2,11 @@ from collections import defaultdict
 import time
 import random
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import Variable
+from gensim.models.keyedvectors import KeyedVectors
+import numpy as np
 
 class CNNclass(torch.nn.Module):
     def __init__(self, nwords, emb_size, num_filters, window_size, ntags):
@@ -70,6 +73,56 @@ class CNN_Text(torch.nn.Module):
         return logit
 
 
+class CNN(nn.Module):
+    # def __init__(self, **kwargs):
+    def __init__(self, nwords, emb_size, num_filters, window_size, ntags, w_matrix):
+        super(CNN, self).__init__()
+
+        self.BATCH_SIZE = 50
+        self.MAX_SENT_LEN = window_size
+        self.WORD_DIM = emb_size
+        self.VOCAB_SIZE = nwords
+        self.CLASS_SIZE = ntags
+        self.FILTERS = [3, 4, 5]
+        self.FILTER_NUM = num_filters
+        self.DROPOUT_PROB = 0.5
+        self.IN_CHANNEL = 1
+
+        assert (len(self.FILTERS) == len(self.FILTER_NUM))
+        self.WV_MATRIX = w_matrix
+        self.embedding.weight.data.copy_(torch.from_numpy(self.WV_MATRIX))
+        self.embedding.weight.requires_grad = False
+
+        # one for UNK and one for zero padding
+        self.embedding = nn.Embedding(self.VOCAB_SIZE + 2, self.WORD_DIM, padding_idx=self.VOCAB_SIZE + 1)
+
+        for i in range(len(self.FILTERS)):
+            conv = nn.Conv1d(self.IN_CHANNEL, self.FILTER_NUM[i], self.WORD_DIM * self.FILTERS[i], stride=self.WORD_DIM)
+            setattr(self, f'conv_{i}', conv)
+
+        self.fc = nn.Linear(sum(self.FILTER_NUM), self.CLASS_SIZE)
+
+    def get_conv(self, i):
+        return getattr(self, f'conv_{i}')
+
+    def forward(self, inp):
+        x = self.embedding(inp).view(-1, 1, self.WORD_DIM * self.MAX_SENT_LEN)
+        if self.MODEL == "multichannel":
+            x2 = self.embedding2(inp).view(-1, 1, self.WORD_DIM * self.MAX_SENT_LEN)
+            x = torch.cat((x, x2), 1)
+
+        conv_results = [
+            F.max_pool1d(F.relu(self.get_conv(i)(x)), self.MAX_SENT_LEN - self.FILTERS[i] + 1)
+                .view(-1, self.FILTER_NUM[i])
+            for i in range(len(self.FILTERS))]
+
+        x = torch.cat(conv_results, 1)
+        x = F.dropout(x, p=self.DROPOUT_PROB, training=self.training)
+        x = self.fc(x)
+
+        return x
+
+
 # Functions to read in the corpus
 w2i = defaultdict(lambda: len(w2i))
 t2i = defaultdict(lambda: len(t2i))
@@ -90,14 +143,30 @@ dev = list(read_dataset("../topicclass/topicclass_valid.txt"))
 test = list(read_dataset("../topicclass/topicclass_test.txt"))
 nwords = len(w2i)
 ntags = len(t2i)
-
+print(t2i)
 # Define the model
 EMB_SIZE = 64
 WIN_SIZE = 3
 FILTER_SIZE = 64
 
+
+print("loading word2vec...")
+word_vectors = KeyedVectors.load_word2vec_format("GoogleNews-vectors-negative300.bin", binary=True)
+
+wv_matrix = []
+for word,tag in train:
+    if word in word_vectors.vocab:
+        wv_matrix.append(word_vectors.word_vec(word))
+    else:
+        wv_matrix.append(np.random.uniform(-0.01, 0.01, 300).astype("float32"))
+
+# one for UNK and one for zero padding
+wv_matrix.append(np.random.uniform(-0.01, 0.01, 300).astype("float32"))
+wv_matrix.append(np.zeros(300).astype("float32"))
+wv_matrix = np.array(wv_matrix)
+
 # initialize the model
-model = CNN_Text(nwords, EMB_SIZE, FILTER_SIZE, WIN_SIZE, ntags)
+model = CNN(nwords, EMB_SIZE, FILTER_SIZE, WIN_SIZE, ntags,wv_matrix)
 criterion = torch.nn.CrossEntropyLoss()
 optimizer = torch.optim.Adam(model.parameters())
 
